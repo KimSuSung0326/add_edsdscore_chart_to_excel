@@ -40,8 +40,8 @@ def read_edsd_scores(workbook):
         if room is None or score is None:
             continue
             
-        # 병실 형식이 "211_1" 패턴이 아니면 건너뛰기
-        if not re.match(r'^\d+_\d+$', str(room)):
+        # 병실 형식이 "211_1" 또는 "211_1_jj" 패턴이 아니면 건너뛰기
+        if not re.match(r'^\d+_\d+(?:_[a-z]+)?$', str(room)):
             continue
             
         match = re.match(r'(\d+_\d+)(?:_(\w+))?', room)
@@ -99,7 +99,7 @@ def prune_old_data(accumulated_data, days_back=30):
     return accumulated_data
 
 # --- 그래프 생성 (오늘 기준 days_back만큼만) ---
-def create_plots_for_date(accumulated_data, current_date, days_back, save_dir="plotImg"): # days_back은 오늘 날짜 기준으로 몇일을 그래프 그릴지 세팅 값
+def create_plots_for_date(accumulated_data, current_date, days_back, save_dir="plotImg", axis_dates=None): # days_back은 오늘 날짜 기준으로 몇일을 그래프 그릴지 세팅 값
     os.makedirs(save_dir, exist_ok=True)
     image_files = {}
     colors = ['r', 'b', 'g', 'orange', 'purple', 'pink']
@@ -114,38 +114,50 @@ def create_plots_for_date(accumulated_data, current_date, days_back, save_dir="p
                 continue
 
             ward_shown = set()
-            fig, ax = plt.subplots(figsize=(15, 5))
+            fig, ax = plt.subplots(figsize=(20, 5))
             ax.set_title(f"{hospital_code} - Room{ward} (~ {current_date.strftime('%Y-%m-%d')})")
             ax.set_xlabel("")
             ax.set_ylabel("EDSD SCORE")
 
             all_y_values = []
 
-            for idx, (room_num, xy_data) in enumerate(rooms.items()):
-                # 오늘 기준 days_back만큼만 데이터 필터링
+            # 1) 먼저 병실별로 필터링된 데이터와 전체 날짜 집합을 수집
+            room_to_filtered = {}
+            ward_date_set = set()
+            for room_num, xy_data in rooms.items():
                 xy_data_filtered = [(d, s) for d, s in xy_data if start_date <= d <= today]
-                if not xy_data_filtered:
-                    continue
+                if xy_data_filtered:
+                    room_to_filtered[room_num] = xy_data_filtered
+                    for d, _ in xy_data_filtered:
+                        ward_date_set.add(d)
 
-                x = [d for d, s in xy_data_filtered]
+            # 날짜를 압축 축으로 사용: 인덱스 0..N-1에 실제 날짜를 매핑
+            # 축 라벨은 기본적으로 axis_dates(폴더 존재 날짜)를 사용하고, 없으면 병실 데이터의 날짜를 사용
+            if axis_dates is not None:
+                axis_dates_filtered = sorted(d for d in axis_dates if start_date <= d <= today)
+            else:
+                axis_dates_filtered = sorted(ward_date_set)
+            date_to_index = {d: i for i, d in enumerate(axis_dates_filtered)}
+
+            # 2) 인덱스 기반으로 선/마커를 그림 (빈 날짜는 축에서 제거되어 압축됨)
+            for idx, (room_num, xy_data_filtered) in enumerate(room_to_filtered.items()):
+                x_idx = [date_to_index[d] for d, s in xy_data_filtered]
                 y = [s + 0.1 if s == 0 else s for d, s in xy_data_filtered]
                 all_y_values.extend(y)
 
-                ax.plot(x, y, marker='o', label=room_num, color=colors[idx % len(colors)])
+                ax.plot(x_idx, y, marker='o', label=room_num, color=colors[idx % len(colors)])
 
-               # 130-135행 근처: 타입 안전성 확보
-                for xi, yi, yi_orig in zip(x, y, [s for d, s in xy_data_filtered]):
+               # 점 위에 값 표시 (인덱스 좌표 기준)
+                for xi, yi, yi_orig in zip(x_idx, y, [s for d, s in xy_data_filtered]):
                     key = (xi, yi_orig, ward)
                     if key not in ward_shown:
-                        # 숫자로 변환 가능한지 확인
                         try:
-                            x_pos = float(xi) + 0.55
+                            x_pos = float(xi) + 0.05
                             y_pos = float(yi) + 0.15
                         except (ValueError, TypeError):
-                            # 변환 실패시 기본값 사용
                             x_pos = xi
                             y_pos = yi + 0.15
-                            
+
                         ax.text(x_pos, y_pos, f"{yi_orig}", fontsize=7,
                                 ha='left', va='bottom', rotation=0, color='black')
                         ward_shown.add(key)
@@ -153,11 +165,15 @@ def create_plots_for_date(accumulated_data, current_date, days_back, save_dir="p
             if all_y_values:
                 ax.set_ylim(0, max(all_y_values) + 3)
 
-            all_dates = sorted(set(d for room_data in rooms.values() for d, s in room_data if start_date <= d <= today)) # x축에 날짜를 그리는 부분
-            ax.set_xticks(all_dates) # x축 눈금 위치(날짜) 지정
-            if len(all_dates) > 10:
-                ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(all_dates)//10)))
-            fig.autofmt_xdate(rotation=45)
+            # 3) x축: 인덱스 눈금과 날짜 문자열 라벨 적용, 좌우 여백 0.5 유지
+            if axis_dates is not None:
+                label_dates = axis_dates_filtered
+            else:
+                label_dates = sorted(ward_date_set)
+            if label_dates:
+                ax.set_xticks(list(range(len(label_dates))))
+                ax.set_xticklabels([d.strftime('%Y-%m-%d') for d in label_dates], rotation=45, ha='right')
+                ax.set_xlim(-0.5, len(label_dates) - 0.5)
 
             ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
 
@@ -223,6 +239,9 @@ if __name__ == '__main__':
 
     print(f"\n각 날짜별 그래프 생성 시작... (총 {len(excel_files)}개 파일)")
 
+    # 폴더가 존재하는 날짜들(축 라벨용)
+    axis_dates = [d for d, _ in excel_files]
+
     for i, (current_date, excel_path) in enumerate(excel_files):
         print(f"\n[{i+1}/{len(excel_files)}] 처리중: {current_date} - {os.path.basename(os.path.dirname(excel_path))}")
 
@@ -243,7 +262,7 @@ if __name__ == '__main__':
 
         # 오늘 기준 days_back만큼만 그래프 생성
         save_dir = f"plotImg_{current_date.strftime('%Y%m%d')}"
-        image_files = create_plots_for_date(accumulated_data, current_date, days_back=30, save_dir=save_dir)# days_back은 오늘 날짜 기준으로 몇일을 그래프 그릴지 세팅 값
+        image_files = create_plots_for_date(accumulated_data, current_date, days_back=30, save_dir=save_dir, axis_dates=axis_dates)# days_back은 오늘 날짜 기준으로 몇일을 그래프 그릴지 세팅 값
 
         if image_files:
             save_to_excel(image_files, excel_path)
